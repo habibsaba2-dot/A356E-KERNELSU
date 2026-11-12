@@ -97,4 +97,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: A356E-KSU-SusFS-Odin
-          path: $HOME/output/A356E_KSU_SusFS_boot.tar
+          path: /home/runner/output/A356E_KSU_SusFS_boot.tar
