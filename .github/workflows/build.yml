@@ -1,0 +1,100 @@
+name: Build A356E KernelSU SusFS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 zip unzip cpio lz4 wget device-tree-compiler
+
+      - name: Setup Clang r450784d & Magiskboot
+        run: |
+          mkdir -p $HOME/toolchain/clang-r450784d
+          cd $HOME/toolchain/clang-r450784d
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r450784d.tar.gz || \
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r450784d.tar.gz
+          tar -xzf clang-r450784d.tar.gz && rm clang-r450784d.tar.gz
+          
+          mkdir -p $HOME/tools && cd $HOME/tools
+          wget -q https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk -O magisk.zip
+          unzip -p magisk.zip lib/x86_64/libmagiskboot.so > magiskboot
+          chmod +x magiskboot
+
+      - name: Download Kernel Source and Stock boot.img
+        run: |
+          mkdir -p $HOME/work && cd $HOME/work
+          wget https://github.com/habibsaba2-dot/A356E-KERNELSU/releases/download/v1.0/Kernel.tar.gz
+          wget https://github.com/habibsaba2-dot/A356E-KERNELSU/releases/download/v1.0/boot.img.lz4
+          tar -xzf Kernel.tar.gz
+          lz4 -d boot.img.lz4 boot.img
+          DEFCONFIG_PATH=$(find $HOME/work -name "s5e8835-a35xjvxx_defconfig" | head -n 1)
+          KERNEL_DIR=$(cd "$(dirname "$DEFCONFIG_PATH")/../../.." && pwd)
+          echo "KERNEL_DIR=$KERNEL_DIR" >> $GITHUB_ENV
+
+      - name: Integrate KernelSU-Next and SusFS (GKI 5.15)
+        run: |
+          cd "$KERNEL_DIR"
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          
+          git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git $HOME/susfs4ksu
+          cp -r $HOME/susfs4ksu/kernel_patches/fs/* fs/
+          cp -r $HOME/susfs4ksu/kernel_patches/include/linux/* include/linux/
+          patch -p1 < $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || true
+
+      - name: Configure Defconfig and Disable Samsung Protections
+        run: |
+          DEFCONFIG="$KERNEL_DIR/arch/arm64/configs/s5e8835-a35xjvxx_defconfig"
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> $DEFCONFIG
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> $DEFCONFIG
+          
+          sed -i 's/CONFIG_SECURITY_DEFEX=y/# CONFIG_SECURITY_DEFEX is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_PROCA=y/# CONFIG_PROCA is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_FIVE=y/# CONFIG_FIVE is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/g' $DEFCONFIG
+
+      - name: Compile A35 Kernel
+        run: |
+          export PATH="$HOME/toolchain/clang-r450784d/bin:$PATH"
+          export PLATFORM_VERSION=13
+          export TARGET_SOC=s5e8835
+          export LLVM=1
+          export DEPMOD=depmod
+          export DTC_FLAGS="-@"
+          export ARCH=arm64
+          
+          cd "$KERNEL_DIR"
+          make O=out s5e8835-a35xjvxx_defconfig
+          make O=out -j$(nproc)
+
+      - name: Repack boot.img and Create Odin Tar
+        run: |
+          mkdir -p $HOME/output && cd $HOME/output
+          cp $HOME/work/boot.img .
+          $HOME/tools/magiskboot unpack boot.img
+          cp "$KERNEL_DIR/out/arch/arm64/boot/Image" kernel
+          $HOME/tools/magiskboot repack boot.img new-boot.img
+          mv new-boot.img boot.img
+          tar -cvf A356E_KSU_SusFS_boot.tar boot.img
+
+      - name: Upload Ready Odin Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: A356E-KSU-SusFS-Odin
+          path: $HOME/output/A356E_KSU_SusFS_boot.tar
