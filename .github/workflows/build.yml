@@ -64,19 +64,39 @@ jobs:
           if os.path.exists(ns_file):
               with open(ns_file, "r") as f:
                   content = f.read()
-              target = "new = copy_tree(old, old->mnt.mnt_root, copy_flags);"
-              if "CL_COPY_MNT_NS" not in content and target in content:
-                  inject = "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tcopy_flags |= CL_COPY_MNT_NS;\n#endif\n\t" + target
-                  content = content.replace(target, inject, 1)
-                  with open(ns_file, "w") as f:
-                      f.write(content)
+
+              header_target = "unsigned int sysctl_mount_max"
+              header_inject = (
+                  "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+                  "extern bool susfs_is_current_ksu_domain(void);\n"
+                  "extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;\n\n"
+                  "#define CL_COPY_MNT_NS BIT(25) /* used by copy_mnt_ns() */\n"
+                  "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\n"
+              )
+              if "CL_COPY_MNT_NS BIT(25)" not in content and header_target in content:
+                  content = content.replace(header_target, header_inject + header_target, 1)
+                  print("Auto-patched header definitions in fs/namespace.c")
+
+              func_target = "new = copy_tree(old, old->mnt.mnt_root, copy_flags);"
+              func_inject = (
+                  "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+                  "\tcopy_flags |= CL_COPY_MNT_NS;\n"
+                  "#endif\n\t"
+              )
+              if "copy_flags |= CL_COPY_MNT_NS;" not in content and func_target in content:
+                  content = content.replace(func_target, func_inject + func_target, 1)
                   print("Auto-patched copy_mnt_ns in fs/namespace.c")
-                  if os.path.exists(ns_rej):
-                      with open(ns_rej, "r") as rf:
-                          rej_txt = rf.read()
-                      if rej_txt.count("@@") == 1 and "copy_mnt_ns" in rej_txt:
-                          os.remove(ns_rej)
-                          print("Removed resolved fs/namespace.c.rej")
+
+              with open(ns_file, "w") as f:
+                  f.write(content)
+
+              if (
+                  "CL_COPY_MNT_NS BIT(25)" in content
+                  and "copy_flags |= CL_COPY_MNT_NS;" in content
+                  and os.path.exists(ns_rej)
+              ):
+                  os.remove(ns_rej)
+                  print("Removed resolved fs/namespace.c.rej")
 
           rejs = sorted(glob.glob("**/*.rej", recursive=True))
           if rejs:
