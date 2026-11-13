@@ -45,10 +45,6 @@ jobs:
           DEFCONFIG_PATH=$(find $HOME/work -name "s5e8835-a35xjvxx_defconfig" | head -n 1)
           KERNEL_DIR=$(cd "$(dirname "$DEFCONFIG_PATH")/../../.." && pwd)
           echo "KERNEL_DIR=$KERNEL_DIR" >> $GITHUB_ENV
-          if [ -f "$KERNEL_DIR/build_kernel.sh" ]; then
-            echo "=== build_kernel.sh ==="
-            cat "$KERNEL_DIR/build_kernel.sh"
-          fi
 
       - name: Integrate KernelSU-Next and Verify SusFS Patch
         run: |
@@ -58,17 +54,40 @@ jobs:
           git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git $HOME/susfs4ksu
           cp -r $HOME/susfs4ksu/kernel_patches/fs/* fs/
           cp -r $HOME/susfs4ksu/kernel_patches/include/linux/* include/linux/
-          patch -p1 --no-backup-if-mismatch < $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || true
+          patch -p1 --fuzz=4 --no-backup-if-mismatch < $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || true
           
-          REJ_FILES=$(find . -name "*.rej")
-          if [ -n "$REJ_FILES" ]; then
-            echo "=== SUSFS PATCH REJECTS FOUND ==="
-            for f in $REJ_FILES; do
-              echo "--- FILE: $f ---"
-              cat "$f"
-            done
-            exit 1
-          fi
+          python3 - << 'EOF'
+          import os, glob
+
+          ns_file = "fs/namespace.c"
+          ns_rej = "fs/namespace.c.rej"
+          if os.path.exists(ns_file):
+              with open(ns_file, "r") as f:
+                  content = f.read()
+              target = "new = copy_tree(old, old->mnt.mnt_root, copy_flags);"
+              if "CL_COPY_MNT_NS" not in content and target in content:
+                  inject = "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n\tcopy_flags |= CL_COPY_MNT_NS;\n#endif\n\t" + target
+                  content = content.replace(target, inject, 1)
+                  with open(ns_file, "w") as f:
+                      f.write(content)
+                  print("Auto-patched copy_mnt_ns in fs/namespace.c")
+                  if os.path.exists(ns_rej):
+                      with open(ns_rej, "r") as rf:
+                          rej_txt = rf.read()
+                      if rej_txt.count("@@") == 1 and "copy_mnt_ns" in rej_txt:
+                          os.remove(ns_rej)
+                          print("Removed resolved fs/namespace.c.rej")
+
+          rejs = sorted(glob.glob("**/*.rej", recursive=True))
+          if rejs:
+              print("=== REMAINING SUSFS PATCH REJECTS ===")
+              for r in rejs:
+                  print(f"\n--- REJECT FILE: {r} ---")
+                  with open(r, "r") as f:
+                      print(f.read())
+              raise SystemExit(1)
+          print("=== ALL SUSFS PATCHES APPLIED CLEANLY ===")
+          EOF
 
       - name: Configure Defconfig and Disable Exynos RKP/KDP Protections
         run: |
@@ -116,7 +135,6 @@ jobs:
           
           cd "$KERNEL_DIR"
           make O=out s5e8835-a35xjvxx_defconfig
-          grep -E "LOCALVERSION|UH|RKP|KDP|DEFEX|PROCA|FIVE|KSU" out/.config || true
           make O=out -j$(nproc)
 
       - name: Repack boot.img and Create Odin Tar
