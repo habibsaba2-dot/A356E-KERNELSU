@@ -25,18 +25,32 @@ jobs:
           unzip -p magisk.zip lib/x86_64/libmagiskboot.so > magiskboot
           chmod +x magiskboot
 
-      - name: Download Kernel Source and Stock boot.img
+      - name: Download Kernel Source and Inspect Stock boot.img
         run: |
           mkdir -p $HOME/work && cd $HOME/work
           wget https://github.com/habibsaba2-dot/A356E-KERNELSU/releases/download/v1.0/Kernel.tar.gz
           wget https://github.com/habibsaba2-dot/A356E-KERNELSU/releases/download/v1.0/boot.img.lz4
           tar -xzf Kernel.tar.gz
           lz4 -d boot.img.lz4 boot.img
+          
+          mkdir -p $HOME/work/stock_unpack && cd $HOME/work/stock_unpack
+          cp $HOME/work/boot.img .
+          $HOME/tools/magiskboot unpack boot.img
+          STOCK_VER=$(strings kernel | grep -m1 "Linux version " | awk '{print $3}')
+          STOCK_LOCALVER=$(echo "$STOCK_VER" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+//')
+          echo "Stock Kernel Full Version: $STOCK_VER"
+          echo "Extracted Stock LOCALVERSION: $STOCK_LOCALVER"
+          echo "STOCK_LOCALVER=$STOCK_LOCALVER" >> $GITHUB_ENV
+          
           DEFCONFIG_PATH=$(find $HOME/work -name "s5e8835-a35xjvxx_defconfig" | head -n 1)
           KERNEL_DIR=$(cd "$(dirname "$DEFCONFIG_PATH")/../../.." && pwd)
           echo "KERNEL_DIR=$KERNEL_DIR" >> $GITHUB_ENV
+          if [ -f "$KERNEL_DIR/build_kernel.sh" ]; then
+            echo "=== build_kernel.sh ==="
+            cat "$KERNEL_DIR/build_kernel.sh"
+          fi
 
-      - name: Integrate KernelSU-Next and SusFS (GKI 5.15)
+      - name: Integrate KernelSU-Next and Verify SusFS Patch
         run: |
           cd "$KERNEL_DIR"
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
@@ -44,9 +58,19 @@ jobs:
           git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git $HOME/susfs4ksu
           cp -r $HOME/susfs4ksu/kernel_patches/fs/* fs/
           cp -r $HOME/susfs4ksu/kernel_patches/include/linux/* include/linux/
-          patch -p1 < $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || true
+          patch -p1 --no-backup-if-mismatch < $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || true
+          
+          REJ_FILES=$(find . -name "*.rej")
+          if [ -n "$REJ_FILES" ]; then
+            echo "=== SUSFS PATCH REJECTS FOUND ==="
+            for f in $REJ_FILES; do
+              echo "--- FILE: $f ---"
+              cat "$f"
+            done
+            exit 1
+          fi
 
-      - name: Configure Defconfig and Disable Samsung Protections
+      - name: Configure Defconfig and Disable Exynos RKP/KDP Protections
         run: |
           DEFCONFIG="$KERNEL_DIR/arch/arm64/configs/s5e8835-a35xjvxx_defconfig"
           echo "CONFIG_KSU=y" >> $DEFCONFIG
@@ -67,7 +91,18 @@ jobs:
           sed -i 's/CONFIG_SECURITY_DEFEX=y/# CONFIG_SECURITY_DEFEX is not set/g' $DEFCONFIG
           sed -i 's/CONFIG_PROCA=y/# CONFIG_PROCA is not set/g' $DEFCONFIG
           sed -i 's/CONFIG_FIVE=y/# CONFIG_FIVE is not set/g' $DEFCONFIG
-          sed -i 's/CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_SECURITY_DSMS=y/# CONFIG_SECURITY_DSMS is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_UH_RKP=y/# CONFIG_UH_RKP is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_UH_LKMAUTH=y/# CONFIG_UH_LKMAUTH is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_KDP=y/# CONFIG_KDP is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_KDP_CRED=y/# CONFIG_KDP_CRED is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_KDP_NS=y/# CONFIG_KDP_NS is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/g' $DEFCONFIG
+          
+          sed -i '/^CONFIG_LOCALVERSION=/d' $DEFCONFIG
+          sed -i '/^CONFIG_LOCALVERSION_AUTO=/d' $DEFCONFIG
+          echo "CONFIG_LOCALVERSION=\"$STOCK_LOCALVER\"" >> $DEFCONFIG
+          echo "# CONFIG_LOCALVERSION_AUTO is not set" >> $DEFCONFIG
 
       - name: Compile A35 Kernel
         run: |
@@ -81,11 +116,12 @@ jobs:
           
           cd "$KERNEL_DIR"
           make O=out s5e8835-a35xjvxx_defconfig
+          grep -E "LOCALVERSION|UH|RKP|KDP|DEFEX|PROCA|FIVE|KSU" out/.config || true
           make O=out -j$(nproc)
 
       - name: Repack boot.img and Create Odin Tar
         run: |
-          mkdir -p $HOME/output && cd $HOME/output
+          mkdir -p /home/runner/output && cd /home/runner/output
           cp $HOME/work/boot.img .
           $HOME/tools/magiskboot unpack boot.img
           cp "$KERNEL_DIR/out/arch/arm64/boot/Image" kernel
