@@ -36,20 +36,29 @@ jobs:
           mkdir -p $HOME/work/stock_unpack && cd $HOME/work/stock_unpack
           cp $HOME/work/boot.img .
           $HOME/tools/magiskboot unpack boot.img
-          STOCK_VER=$(strings kernel | grep -m1 "Linux version " | awk '{print $3}')
+          STOCK_VERMAGIC=$(strings kernel | grep -m1 "vermagic=" | sed 's/^vermagic=//')
+          STOCK_VER=$(echo "$STOCK_VERMAGIC" | awk '{print $1}')
+          if [ -z "$STOCK_VER" ]; then
+            STOCK_VER=$(strings kernel | grep -m1 "Linux version " | awk '{print $3}')
+          fi
           STOCK_LOCALVER=$(echo "$STOCK_VER" | sed -E 's/^[0-9]+\.[0-9]+\.[0-9]+//')
-          echo "Stock Kernel Full Version: $STOCK_VER"
+          echo "Stock Kernel vermagic: $STOCK_VERMAGIC"
           echo "Extracted Stock LOCALVERSION: $STOCK_LOCALVER"
           echo "STOCK_LOCALVER=$STOCK_LOCALVER" >> $GITHUB_ENV
           
           DEFCONFIG_PATH=$(find $HOME/work -name "s5e8835-a35xjvxx_defconfig" | head -n 1)
           KERNEL_DIR=$(cd "$(dirname "$DEFCONFIG_PATH")/../../.." && pwd)
           echo "KERNEL_DIR=$KERNEL_DIR" >> $GITHUB_ENV
+          if [ -f "$KERNEL_DIR/build_kernel.sh" ]; then
+            echo "=== build_kernel.sh ==="
+            cat "$KERNEL_DIR/build_kernel.sh"
+          fi
 
-      - name: Integrate KernelSU-Next and Verify SusFS Patch
+      - name: Integrate KernelSU-Next, SusFS, and Module CRC Compatibility
         run: |
           chmod -R u+w "$KERNEL_DIR"
           cd "$KERNEL_DIR"
+          touch .scmversion
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
           
           git clone --depth=1 -b gki-android13-5.15 https://gitlab.com/simonpunk/susfs4ksu.git $HOME/susfs4ksu
@@ -91,8 +100,6 @@ jobs:
                   if count > 0:
                       content = new_content
                       print("Auto-patched copy_mnt_ns in fs/namespace.c")
-                  else:
-                      print("WARNING: Could not find CL_SHARED_TO_SLAVE in fs/namespace.c")
 
               with open(ns_file, "w") as f:
                   f.write(content)
@@ -104,6 +111,18 @@ jobs:
               ):
                   os.remove(ns_rej)
                   print("Removed resolved fs/namespace.c.rej")
+
+          for mod_file in ["kernel/module.c", "kernel/module/version.c"]:
+              if os.path.exists(mod_file):
+                  os.chmod(mod_file, 0o644)
+                  with open(mod_file, "r") as f:
+                      mcontent = f.read()
+                  m_pat = r'(static\s+int\s+check_version\s*\([^)]*\)\s*\{)'
+                  m_new, m_cnt = re.subn(m_pat, r'\1\n\treturn 1;', mcontent, count=1)
+                  if m_cnt > 0:
+                      with open(mod_file, "w") as f:
+                          f.write(m_new)
+                      print(f"Patched check_version in {mod_file} to allow stock vendor_boot modules")
 
           rejs = sorted(glob.glob("**/*.rej", recursive=True))
           if rejs:
@@ -161,8 +180,9 @@ jobs:
           export ARCH=arm64
           
           cd "$KERNEL_DIR"
-          make O=out s5e8835-a35xjvxx_defconfig
-          make O=out -j$(nproc)
+          make O=out LOCALVERSION="$STOCK_LOCALVER" s5e8835-a35xjvxx_defconfig
+          make O=out LOCALVERSION="$STOCK_LOCALVER" -j$(nproc)
+          echo "Compiled Kernel vermagic: $(strings out/vmlinux | grep -m1 'vermagic=' | sed 's/^vermagic=//')"
 
       - name: Repack boot.img and Create Odin Tar
         run: |
