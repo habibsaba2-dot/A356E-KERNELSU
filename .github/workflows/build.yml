@@ -48,6 +48,7 @@ jobs:
 
       - name: Integrate KernelSU-Next and Verify SusFS Patch
         run: |
+          chmod -R u+w "$KERNEL_DIR"
           cd "$KERNEL_DIR"
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
           
@@ -57,11 +58,12 @@ jobs:
           patch -p1 --fuzz=4 --no-backup-if-mismatch < $HOME/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch || true
           
           python3 - << 'EOF'
-          import os, glob
+          import os, re, glob
 
           ns_file = "fs/namespace.c"
           ns_rej = "fs/namespace.c.rej"
           if os.path.exists(ns_file):
+              os.chmod(ns_file, 0o644)
               with open(ns_file, "r") as f:
                   content = f.read()
 
@@ -77,15 +79,20 @@ jobs:
                   content = content.replace(header_target, header_inject + header_target, 1)
                   print("Auto-patched header definitions in fs/namespace.c")
 
-              func_target = "new = copy_tree(old, old->mnt.mnt_root, copy_flags);"
-              func_inject = (
-                  "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
-                  "\tcopy_flags |= CL_COPY_MNT_NS;\n"
-                  "#endif\n\t"
-              )
-              if "copy_flags |= CL_COPY_MNT_NS;" not in content and func_target in content:
-                  content = content.replace(func_target, func_inject + func_target, 1)
-                  print("Auto-patched copy_mnt_ns in fs/namespace.c")
+              if "copy_flags |= CL_COPY_MNT_NS;" not in content:
+                  pattern = r'(copy_flags\s*\|=\s*CL_SHARED_TO_SLAVE;)'
+                  replacement = (
+                      r'\1\n'
+                      r'#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n'
+                      r'\tcopy_flags |= CL_COPY_MNT_NS;\n'
+                      r'#endif'
+                  )
+                  new_content, count = re.subn(pattern, replacement, content, count=1)
+                  if count > 0:
+                      content = new_content
+                      print("Auto-patched copy_mnt_ns in fs/namespace.c")
+                  else:
+                      print("WARNING: Could not find CL_SHARED_TO_SLAVE in fs/namespace.c")
 
               with open(ns_file, "w") as f:
                   f.write(content)
