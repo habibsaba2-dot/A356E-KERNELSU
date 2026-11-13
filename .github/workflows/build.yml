@@ -49,10 +49,6 @@ jobs:
           DEFCONFIG_PATH=$(find $HOME/work -name "s5e8835-a35xjvxx_defconfig" | head -n 1)
           KERNEL_DIR=$(cd "$(dirname "$DEFCONFIG_PATH")/../../.." && pwd)
           echo "KERNEL_DIR=$KERNEL_DIR" >> $GITHUB_ENV
-          if [ -f "$KERNEL_DIR/build_kernel.sh" ]; then
-            echo "=== build_kernel.sh ==="
-            cat "$KERNEL_DIR/build_kernel.sh"
-          fi
 
       - name: Integrate KernelSU-Next, SusFS, and Module CRC Compatibility
         run: |
@@ -117,12 +113,18 @@ jobs:
                   os.chmod(mod_file, 0o644)
                   with open(mod_file, "r") as f:
                       mcontent = f.read()
-                  m_pat = r'(static\s+int\s+check_version\s*\([^)]*\)\s*\{)'
-                  m_new, m_cnt = re.subn(m_pat, r'\1\n\treturn 1;', mcontent, count=1)
-                  if m_cnt > 0:
-                      with open(mod_file, "w") as f:
-                          f.write(m_new)
-                      print(f"Patched check_version in {mod_file} to allow stock vendor_boot modules")
+                  m = re.search(r'static\s+int\s+check_version\s*\([^;]*?\)\s*\{', mcontent, flags=re.DOTALL)
+                  if m:
+                      idx = m.start()
+                      end_idx = mcontent.find("\n}", idx)
+                      if end_idx != -1:
+                          func_body = mcontent[idx:end_idx]
+                          if "return 0;" in func_body:
+                              func_body = func_body.replace("return 0;", "return 1;")
+                              mcontent = mcontent[:idx] + func_body + mcontent[end_idx:]
+                              with open(mod_file, "w") as f:
+                                  f.write(mcontent)
+                              print(f"Patched check_version return value in {mod_file}")
 
           rejs = sorted(glob.glob("**/*.rej", recursive=True))
           if rejs:
@@ -157,6 +159,7 @@ jobs:
           sed -i 's/CONFIG_PROCA=y/# CONFIG_PROCA is not set/g' $DEFCONFIG
           sed -i 's/CONFIG_FIVE=y/# CONFIG_FIVE is not set/g' $DEFCONFIG
           sed -i 's/CONFIG_SECURITY_DSMS=y/# CONFIG_SECURITY_DSMS is not set/g' $DEFCONFIG
+          sed -i 's/CONFIG_RKP=y/# CONFIG_RKP is not set/g' $DEFCONFIG
           sed -i 's/CONFIG_UH_RKP=y/# CONFIG_UH_RKP is not set/g' $DEFCONFIG
           sed -i 's/CONFIG_UH_LKMAUTH=y/# CONFIG_UH_LKMAUTH is not set/g' $DEFCONFIG
           sed -i 's/CONFIG_KDP=y/# CONFIG_KDP is not set/g' $DEFCONFIG
@@ -171,6 +174,7 @@ jobs:
 
       - name: Compile A35 Kernel
         run: |
+          set -o pipefail
           export PATH="$HOME/toolchain/clang-r450784d/bin:$PATH"
           export PLATFORM_VERSION=13
           export TARGET_SOC=s5e8835
@@ -181,7 +185,11 @@ jobs:
           
           cd "$KERNEL_DIR"
           make O=out LOCALVERSION="$STOCK_LOCALVER" s5e8835-a35xjvxx_defconfig
-          make O=out LOCALVERSION="$STOCK_LOCALVER" -j$(nproc)
+          make O=out LOCALVERSION="$STOCK_LOCALVER" -j$(nproc) 2>&1 | tee /tmp/a35_build.log || {
+            echo "=== COMPILER ERROR SUMMARY ==="
+            grep -iE "error:|fatal error:" /tmp/a35_build.log | tail -n 25
+            exit 1
+          }
           echo "Compiled Kernel vermagic: $(strings out/vmlinux | grep -m1 'vermagic=' | sed 's/^vermagic=//')"
 
       - name: Repack boot.img and Create Odin Tar
